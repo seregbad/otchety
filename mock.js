@@ -18,7 +18,8 @@ let settings = {
   engineer: 'Иванов И.И.',
   showChangeMark: false,
   tasksModule: false,
-  reminder: { enabled: false, weekday: 5, hour: 15, email: '' },
+  reminder: { enabled: false, weekday: 5, hour: 15, email: '', onlyIfIncomplete: true },
+  appUrl: '',
 };
 
 const link = id => ({ text: `https://example.com/f/${id}`, links: [{ label: `https://example.com/f/${id}`, url: `https://example.com/f/${id}` }] });
@@ -79,8 +80,13 @@ weeks.slice(0, 12).forEach((w, i) => {
 const actions = {
   ping: () => ({ time: new Date().toISOString(), spreadsheet: 'Демо-режим' }),
   getDirectories: () => dirs,
-  getSettings: () => settings,
-  saveSettings: p => (settings = { ...settings, ...(p.settings || {}) }),
+  getSettings: () => ({ ...settings, reminderActive: settings.reminder.enabled }),
+  saveSettings: p => {
+    const patch = p.settings || {};
+    settings = { ...settings, ...patch, reminder: { ...settings.reminder, ...(patch.reminder || {}) } };
+    return { ...settings, reminderActive: settings.reminder.enabled };
+  },
+  sendTestReminder: () => ({ to: settings.reminder.email || 'demo@example.com' }),
   listWeeks: () => weeks.map(w => ({
     sheetName: w.sheetName, start: w.start, end: w.end, weekNumber: w.weekNumber,
     objectsCount: w.rows.filter(r => r.object).length,

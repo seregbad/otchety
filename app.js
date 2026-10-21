@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 // ---------- Утилиты ----------
 
@@ -142,6 +142,7 @@ async function renderWeeks(seq) {
   if (seq !== renderSeq) return;
   state.weeks = data;
   view.innerHTML = weeksHtml(data, offline);
+  if (!offline) prefetch(data);
 }
 
 function weeksHtml(weeks, offline) {
@@ -156,8 +157,12 @@ function weeksHtml(weeks, offline) {
       ${drafts.has(w.sheetName) ? '<span class="pill draft">черновик</span>' : ''}
       <span class="pill">${w.objectsCount} об.</span><span class="chev">›</span>
     </a>`;
+  const conflicts = [...drafts].filter(n => (store.get('draft:' + n, {}) || {}).conflict);
   return `
-    ${offline ? '<div class="banner">Нет связи — показан сохранённый список</div>' : ''}
+    ${offline ? '<div class="banner">Нет связи — показан сохранённый список. Правки сохранятся на телефоне.</div>' : ''}
+    ${drafts.size ? `<div class="banner">
+      Не отправлено в таблицу: ${[...drafts].map(esc).join(', ')}${conflicts.length ? `<br>Лист изменили в таблице: ${conflicts.map(esc).join(', ')} — откройте неделю и выберите версию` : ''}
+      <button class="btn small" data-act="sync-drafts" style="margin-top:8px; width:100%">Отправить сейчас</button></div>` : ''}
     <button class="btn primary block" data-act="open-current">Открыть текущую неделю</button>
     <h2>Отчёты</h2>
     <div class="list">${shown.map(item).join('') || '<div class="empty">Пока пусто</div>'}</div>
@@ -674,12 +679,40 @@ async function renderSettings(seq) {
       <small>Оба модуля появятся в следующих этапах; сейчас сохраняется только выбор.</small>
     </div>
     <button class="btn primary block" data-act="settings-save">Сохранить настройки</button>
+    ${reminderHtml(s)}
     <h2>Приложение</h2>
     <div class="list">
       <div class="item"><div><b>Версия</b><small>${VERSION}</small></div></div>
       <div class="item"><div><b>Черновики на телефоне</b><small>${store.keys('draft:').length}</small></div></div>
     </div>
     <button class="btn block danger" data-act="cache-clear">Очистить кэш (черновики останутся)</button>`;
+}
+
+const DAYS = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+
+function reminderHtml(s) {
+  const r = { enabled: false, weekday: 5, hour: 15, email: '', onlyIfIncomplete: true, ...(s.reminder || {}) };
+  const hours = Array.from({ length: 15 }, (_, i) => i + 7);
+  const status = s.reminderActive === undefined ? '' : s.reminderActive
+    ? `<small class="hint">Включено: ${DAYS[r.weekday - 1].toLowerCase()}, около ${r.hour}:00</small>`
+    : (r.enabled ? '<small class="hint attention">Расписание не работает — сохраните ещё раз или запустите testReminder() в редакторе</small>' : '');
+  return `
+    <h2>Напоминание об отчёте</h2>
+    <div class="field">
+      <label class="switch">Присылать письмо-напоминание<input type="checkbox" id="rem-on" ${r.enabled ? 'checked' : ''}></label>
+      <div class="filters" style="grid-template-columns: minmax(0, 1fr) 110px; margin: 6px 0 8px">
+        <select id="rem-day" aria-label="День">${DAYS.map((d, i) => `<option value="${i + 1}" ${Number(r.weekday) === i + 1 ? 'selected' : ''}>${d}</option>`).join('')}</select>
+        <select id="rem-hour" aria-label="Время">${hours.map(h => `<option value="${h}" ${Number(r.hour) === h ? 'selected' : ''}>${h}:00</option>`).join('')}</select>
+      </div>
+      <input type="text" inputmode="email" id="rem-email" value="${esc(r.email)}" placeholder="почта (по умолчанию — ваша Google-почта)" autocomplete="off">
+      <label class="switch">Только если отчёт не дозаполнен<input type="checkbox" id="rem-only" ${r.onlyIfIncomplete !== false ? 'checked' : ''}></label>
+      <small>Проверяется текущая неделя: есть ли объекты, заполнены ли «Выполнено», «План» и «Итог недели». В письме — что осталось и ссылка на приложение.</small>
+      ${status}
+    </div>
+    <div class="row-btns">
+      <button class="btn" data-act="reminder-test">Прислать сейчас</button>
+      <button class="btn primary" data-act="reminder-save">Сохранить</button>
+    </div>`;
 }
 
 function connectionHtml() {
@@ -733,8 +766,8 @@ function renderSaveBar() {
     <button class="btn small primary" data-act="save">Сохранить</button>`;
 }
 
-function rowsForSave() {
-  return state.draft.rows.map(r => {
+function rowsForSave(rows = state.draft.rows) {
+  return rows.map(r => {
     const out = {};
     FIELDS.forEach(f => {
       out[f] = typeof r[f] === 'string' ? r[f].replace(/\s+$/, '') : r[f];
@@ -780,12 +813,82 @@ async function save(opts = {}) {
         `На листе место на ${e.data.capacity} объектов. Добавить строки в таблицу? Формулы, списки и цвета растянутся сами.`, 'Добавить строки');
       if (ok) return save({ ...opts, expand: true });
     } else if (isOffline(e)) {
-      toast('Нет связи. Черновик сохранён на телефоне — нажмите «Сохранить», когда появится интернет.');
+      toast('Нет связи. Черновик сохранён на телефоне и уйдёт в таблицу сам, когда появится интернет.');
     } else {
       toast(e.message);
     }
   }
 }
+
+// ---------- Работа без связи ----------
+
+let syncing = false;
+
+/**
+ * Отправляет черновики всех недель, кроме открытой сейчас в редакторе.
+ * Конфликт оставляет черновик с пометкой — его решают вручную при открытии недели.
+ */
+async function syncDrafts({ manual = false } = {}) {
+  if (syncing || !state.cfg.url) return null;
+  const [page, openName] = route();
+  const names = store.keys('draft:').map(k => k.slice(6)).filter(n => !(page === 'week' && n === openName));
+  if (!names.length) return null;
+  syncing = true;
+  const res = { sent: [], conflicts: [], offline: false };
+  try {
+    for (const name of names) {
+      const d = store.get('draft:' + name, null);
+      if (!d || (d.conflict && !manual)) continue;
+      try {
+        const week = await api('saveWeek', {
+          sheetName: name, rows: rowsForSave(d.rows), summary: String(d.summary || '').replace(/\s+$/, ''), baseVersion: d.baseVersion,
+        });
+        store.del('draft:' + name);
+        store.set('cache:week:' + name, week);
+        if (state.week && state.week.sheetName === name) setWeek(week);
+        res.sent.push(name);
+      } catch (e) {
+        if (isOffline(e)) { res.offline = true; break; }
+        if (e.code === 'CONFLICT') {
+          store.set('draft:' + name, { ...d, conflict: true });
+          res.conflicts.push(name);
+        } else {
+          toast(`«${name}»: ${e.message}`);
+        }
+      }
+    }
+  } finally {
+    syncing = false;
+  }
+  if (res.sent.length) {
+    state.weeks = null;
+    state.historyFresh = false;
+    toast(`Отправлено в таблицу: ${res.sent.join(', ')}` + (res.conflicts.length ? `. Конфликт: ${res.conflicts.join(', ')} — откройте неделю` : ''));
+  } else if (res.conflicts.length) {
+    toast(`Лист изменили в таблице: ${res.conflicts.join(', ')} — откройте неделю и выберите версию`);
+  } else if (manual && res.offline) {
+    toast('Нет связи — отправлю, когда появится интернет');
+  }
+  if (route()[0] === 'weeks' && (res.sent.length || res.conflicts.length)) render();
+  return res;
+}
+
+/** Текущая и последняя заполненная недели заранее сохраняются на телефоне — на объекте без связи они откроются. */
+async function prefetch(weeks) {
+  const today = ymd(new Date());
+  const current = weeks.find(w => w.start <= today && today <= w.end);
+  const filled = weeks.filter(w => w.objectsCount > 0).pop();
+  for (const w of [current, filled]) {
+    if (!w || prefetched.has(w.sheetName)) continue;
+    prefetched.add(w.sheetName);
+    try {
+      store.set('cache:week:' + w.sheetName, await api('getWeek', { sheetName: w.sheetName }));
+    } catch (e) { /* в следующий раз */ }
+  }
+  if (!state.dirs) loadDirs().catch(() => { /* в следующий раз */ });
+}
+
+const prefetched = new Set();
 
 // ---------- Действия ----------
 
@@ -798,8 +901,19 @@ const ACTS = {
     render();
   },
 
+  'sync-drafts': () => syncDrafts({ manual: true }),
+
   'open-current': async () => {
-    const res = await busy(() => api('ensureWeek', { date: ymd(new Date()), carryOver: false }));
+    let res;
+    try {
+      res = await busy(() => api('ensureWeek', { date: ymd(new Date()), carryOver: false }));
+    } catch (e) {
+      // Без связи открываем текущую неделю из сохранённого на телефоне.
+      const today = ymd(new Date());
+      const w = isOffline(e) && (state.weeks || []).find(x => x.start <= today && today <= x.end);
+      if (w && store.get('cache:week:' + w.sheetName, null)) return go('week', w.sheetName);
+      throw e;
+    }
     setWeek(res.week);
     if (res.created) { state.weeks = null; toast('Создан лист «' + res.week.sheetName + '»'); }
     go('week', res.week.sheetName);
@@ -1002,6 +1116,27 @@ const ACTS = {
     toast('Демо-режим: таблица не меняется');
   },
 
+  'reminder-save': async () => {
+    const reminder = {
+      enabled: $('#rem-on').checked,
+      weekday: Number($('#rem-day').value),
+      hour: Number($('#rem-hour').value),
+      email: $('#rem-email').value.trim(),
+      onlyIfIncomplete: $('#rem-only').checked,
+    };
+    if (reminder.email && !/^\S+@\S+\.\S+$/.test(reminder.email)) return toast('Проверьте адрес почты');
+    const appUrl = location.origin + location.pathname;
+    state.settings = await busy(() => api('saveSettings', { settings: { reminder, appUrl } }));
+    store.set('cache:settings', state.settings);
+    toast(reminder.enabled ? `Напоминание: ${DAYS[reminder.weekday - 1].toLowerCase()}, ${reminder.hour}:00` : 'Напоминание выключено');
+    render();
+  },
+
+  'reminder-test': async () => {
+    const res = await busy(() => api('sendTestReminder'));
+    toast('Письмо отправлено на ' + res.to);
+  },
+
   'settings-save': async () => {
     const settings = {
       company: $('#set-company').value.trim(),
@@ -1099,6 +1234,12 @@ document.addEventListener('keydown', ev => {
   }
 });
 
+window.addEventListener('offline', () => toast('Нет связи — работаю с сохранённым на телефоне'));
+window.addEventListener('online', () => {
+  toast('Связь появилась');
+  syncDrafts();
+});
+
 window.addEventListener('hashchange', () => {
   window.scrollTo(0, 0);
   render();
@@ -1160,3 +1301,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => { /* без офлайн-оболочки */ });
 }
 render();
+setTimeout(() => { if (navigator.onLine) syncDrafts(); }, 2000);

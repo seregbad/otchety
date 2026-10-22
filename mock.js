@@ -86,6 +86,7 @@ const actions = {
     settings = { ...settings, ...patch, reminder: { ...settings.reminder, ...(patch.reminder || {}) } };
     return { ...settings, reminderActive: settings.reminder.enabled };
   },
+  resetCache: () => ({ done: true }),
   sendTestReminder: () => ({ to: settings.reminder.email || 'demo@example.com' }),
   listWeeks: () => weeks.map(w => ({
     sheetName: w.sheetName, start: w.start, end: w.end, weekNumber: w.weekNumber,

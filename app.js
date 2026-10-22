@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.7.3';
+const VERSION = '0.8.0';
 
 // ---------- Утилиты ----------
 
@@ -57,7 +57,24 @@ const state = {
   filters: { period: '3m', status: '', contractor: '', ...store.get('filters', {}) },
 };
 
-const api = createApi(() => state.cfg);
+const rawApi = createApi(() => state.cfg);
+
+/** Состояние связи для кнопки в шапке — как в приложении «Поездки». */
+const net = { error: '', syncing: false, syncedAt: store.get('syncedAt', null) };
+
+/** Все запросы идут через эту обёртку: она отмечает, есть ли связь с таблицей. */
+async function api(action, params) {
+  try {
+    const data = await rawApi(action, params);
+    if (net.error) { net.error = ''; renderStatus(); }
+    return data;
+  } catch (e) {
+    // Только сбои связи; ошибки вроде «конфликт» или «нет в справочнике» связь не портят.
+    const transport = isOffline(e) ? 'Нет связи' : ['BAD_RESPONSE', 'NO_ACTION', 'UNAUTHORIZED', 'NOT_CONFIGURED'].includes(e.code) ? 'Ошибка' : '';
+    if (transport && transport !== net.error) { net.error = transport; renderStatus(); }
+    throw e;
+  }
+}
 
 /** Запрос с запасным ответом из кэша, если нет связи. */
 async function cached(cacheKey, action, params) {
@@ -131,8 +148,83 @@ function setBar({ title, sub = '', back = '', right = '' }) {
   $('#bar').innerHTML = `
     ${back ? `<a class="bar-btn" href="${back}" aria-label="Назад">‹</a>` : '<span></span>'}
     <div class="bar-title"><div>${esc(title)}</div>${sub ? `<small>${esc(sub)}</small>` : ''}</div>
-    <div class="bar-right">${right}</div>`;
+    <div class="bar-right">${state.cfg.url ? statusHtml(!!right) : ''}${right}</div>`;
 }
+
+// ---------- Статус связи и синхронизация ----------
+
+function syncStatus() {
+  const drafts = store.keys(draftPrefix());
+  const pending = drafts.filter(k => !(store.get(k, {}) || {}).conflict).length;
+  const conflicts = drafts.length - pending;
+  const wait = pending ? ` · ${pending} ждут` : '';
+  let text;
+  let cls;
+  if (state.cfg.url === 'demo') { text = 'Демо'; cls = ''; }
+  else if (net.syncing) { text = 'Синхронизация…'; cls = 'busy'; }
+  else if (!navigator.onLine) { text = 'Офлайн' + wait; cls = 'off'; }
+  else if (net.error) { text = net.error + wait; cls = 'off'; }
+  else { text = pending ? `${pending} ждут` : 'Синхронно'; cls = pending ? 'busy-still' : 'on'; }
+  if (conflicts) text += ` · ⚠ ${conflicts}`;
+  return { text, cls };
+}
+
+/** Кнопка-статус в шапке; рядом с другой кнопкой (PDF, «Удалить») — только точка. */
+function statusHtml(compact) {
+  const s = syncStatus();
+  return `<button class="sync-pill${compact ? ' compact' : ''}" data-act="force-sync" title="${esc(s.text)}" aria-label="Синхронизировать с таблицей: ${esc(s.text)}">
+    <span class="dot ${s.cls}"></span>${compact ? '' : `<span>${esc(s.text)}</span>`}</button>`;
+}
+
+function renderStatus() {
+  const el = $('.sync-pill');
+  if (el) el.outerHTML = statusHtml(el.classList.contains('compact'));
+}
+
+/**
+ * Принудительная синхронизация: отправить все черновики, сбросить кэш в скрипте
+ * и заново загрузить из таблицы список недель, справочники, историю и открытую неделю.
+ */
+async function forceSync() {
+  if (net.syncing) return;
+  if (!navigator.onLine) {
+    renderStatus();
+    return toast('Нет интернета — отправлю и обновлю, когда появится связь');
+  }
+  net.syncing = true;
+  renderStatus();
+  let failed = '';
+  try {
+    await syncDrafts({ manual: true });
+    await api('resetCache').catch(e => { if (e.code !== 'UNKNOWN_ACTION') throw e; });
+    state.historyFresh = false;
+    const open = state.week && !state.draft.dirty ? state.week.sheetName : null;
+    const [weeks] = await Promise.all([
+      api('listWeeks'),
+      loadDirs(true),
+      refreshHistory(),
+      open ? api('getWeek', { sheetName: open }).then(w => { store.set('cache:week:' + open, w); if (state.week && state.week.sheetName === open && !state.draft.dirty) setWeek(w); }) : null,
+    ]);
+    state.weeks = weeks;
+    store.set('cache:weeks', weeks);
+    prefetched.clear();
+    prefetch(weeks);
+    net.syncedAt = Date.now();
+    store.set('syncedAt', net.syncedAt);
+  } catch (e) {
+    failed = e.message;
+  } finally {
+    net.syncing = false;
+  }
+  toast(failed ? 'Не удалось синхронизировать: ' + failed : 'Синхронизировано с таблицей');
+  render();
+}
+
+const syncedAtText = () => {
+  if (!net.syncedAt) return 'ещё не было';
+  const d = new Date(net.syncedAt);
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} в ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
 
 const loading = () => '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
 
@@ -903,6 +995,8 @@ async function renderSettings(seq) {
     <div class="list">
       <div class="item"><div><b>Версия</b><small>${VERSION}</small></div></div>
       <div class="item"><div><b>Черновики на телефоне</b><small>${store.keys(draftPrefix()).length}</small></div></div>
+      <div class="item"><div><b>Данные из таблицы</b><small>последняя полная синхронизация: ${syncedAtText()}</small></div>
+        <button class="btn small" data-act="force-sync">Синхронизировать</button></div>
       ${s.lastBackup
         ? `<a class="item" href="${esc(s.lastBackup.folderUrl)}" target="_blank" rel="noopener"><div><b>Резервная копия таблицы</b><small>последняя: ${esc(s.lastBackup.at)} · папка «Отчёты — архив»</small></div><span class="chev">›</span></a>`
         : '<div class="item"><div><b>Резервная копия таблицы</b><small>не включена — запустите setupBackup() в скрипте таблицы</small></div></div>'}
@@ -974,6 +1068,7 @@ function persistDraft() {
   const d = state.draft;
   if (!d || !d.dirty) return;
   store.set(draftPrefix() + state.week.sheetName, { rows: d.rows, summary: d.summary, baseVersion: d.baseVersion, savedAt: d.savedAt });
+  renderStatus();
 }
 
 function renderSaveBar() {
@@ -1092,6 +1187,7 @@ async function syncDrafts({ manual = false } = {}) {
     toast('Нет связи — отправлю, когда появится интернет');
   }
   if (route()[0] === 'weeks' && (res.sent.length || res.conflicts.length)) render();
+  renderStatus();
   return res;
 }
 
@@ -1116,6 +1212,8 @@ const prefetched = new Set();
 
 const ACTS = {
   retry: () => render(),
+
+  'force-sync': () => forceSync(),
 
   period: el => {
     state.filters.period = el.dataset.p;
@@ -1504,14 +1602,21 @@ document.addEventListener('keydown', ev => {
 window.addEventListener('offline', () => toast('Нет связи — работаю с сохранённым на телефоне'));
 window.addEventListener('online', () => {
   toast('Связь появилась');
+  renderStatus();
   syncDrafts();
 });
+window.addEventListener('offline', renderStatus);
 
 window.addEventListener('hashchange', () => {
   window.scrollTo(0, 0);
   render();
 });
-document.addEventListener('visibilitychange', () => { if (document.hidden) persistDraft(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return persistDraft();
+  // Вернулись в приложение — отправить, что не ушло, и обновить статус.
+  renderStatus();
+  if (navigator.onLine) syncDrafts();
+});
 
 // ---------- Всплывающие элементы ----------
 

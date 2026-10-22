@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 
 // ---------- Утилиты ----------
 
@@ -197,14 +197,18 @@ async function forceSync() {
   try {
     await syncDrafts({ manual: true });
     await api('resetCache').catch(e => { if (e.code !== 'UNKNOWN_ACTION') throw e; });
-    state.historyFresh = false;
     const open = state.week && !state.draft.dirty ? state.week.sheetName : null;
     const [weeks] = await Promise.all([
       api('listWeeks'),
       loadDirs(true),
-      refreshHistory(),
       open ? api('getWeek', { sheetName: open }).then(w => { store.set('cache:week:' + open, w); if (state.week && state.week.sheetName === open && !state.draft.dirty) setWeek(w); }) : null,
     ]);
+    // История после сброса кэша собирается в скрипте десятки секунд — догружаем в фоне,
+    // экраны «Объекты» и сводка обновятся сами.
+    state.historyFresh = false;
+    refreshHistory().then(() => {
+      if (['objects', 'object', 'month'].includes(route()[0])) render();
+    }).catch(() => { /* останется прежняя история */ });
     state.weeks = weeks;
     store.set('cache:weeks', weeks);
     prefetched.clear();

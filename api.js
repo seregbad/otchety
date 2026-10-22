@@ -38,7 +38,8 @@ export function createApi(getCfg) {
     if (url === 'demo') return mockCall(action, params);
 
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 45000);
+    // Сборка истории и PDF на стороне Google бывают долгими — им больше времени.
+    const timer = setTimeout(() => ctrl.abort(), ['getHistory', 'exportPdf', 'getAll'].includes(action) ? 90000 : 45000);
     let res;
     try {
       res = await fetch(url, {

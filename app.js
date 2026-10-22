@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 // ---------- Утилиты ----------
 
@@ -32,6 +32,9 @@ const store = {
     try { return Object.keys(localStorage).filter(k => k.startsWith(prefix)); } catch (e) { return []; }
   },
 };
+
+/** Черновики демо-режима хранятся отдельно, чтобы никогда не уйти в настоящую таблицу. */
+const draftPrefix = () => (state.cfg.url === 'demo' ? 'demo-draft:' : 'draft:');
 
 const STATUS_CLASS = {
   'Выполнено': 'ok', 'В работе': 'work', 'Впереди': 'next',
@@ -148,7 +151,7 @@ async function renderWeeks(seq) {
 function weeksHtml(weeks, offline) {
   const today = ymd(new Date());
   const current = weeks.find(w => w.start <= today && today <= w.end);
-  const drafts = new Set(store.keys('draft:').map(k => k.slice(6)));
+  const drafts = new Set(store.keys(draftPrefix()).map(k => k.slice(draftPrefix().length)));
   const shown = weeks.filter(w => w.objectsCount > 0 || w === current || drafts.has(w.sheetName)).reverse();
   const empty = weeks.filter(w => !shown.includes(w));
   const item = w => `
@@ -157,7 +160,7 @@ function weeksHtml(weeks, offline) {
       ${drafts.has(w.sheetName) ? '<span class="pill draft">черновик</span>' : ''}
       <span class="pill">${w.objectsCount} об.</span><span class="chev">›</span>
     </a>`;
-  const conflicts = [...drafts].filter(n => (store.get('draft:' + n, {}) || {}).conflict);
+  const conflicts = [...drafts].filter(n => (store.get(draftPrefix() + n, {}) || {}).conflict);
   return `
     ${offline ? '<div class="banner">Нет связи — показан сохранённый список. Правки сохранятся на телефоне.</div>' : ''}
     ${drafts.size ? `<div class="banner">
@@ -185,7 +188,7 @@ function setWeek(week, offline = false) {
   state.week = week;
   state.offline = offline;
   store.set('cache:week:' + week.sheetName, week);
-  const saved = store.get('draft:' + week.sheetName, null);
+  const saved = store.get(draftPrefix() + week.sheetName, null);
   state.draft = saved
     ? { ...saved, dirty: true }
     : { rows: week.rows.map(pickRow), summary: week.summary, baseVersion: week.version, dirty: false };
@@ -683,7 +686,7 @@ async function renderSettings(seq) {
     <h2>Приложение</h2>
     <div class="list">
       <div class="item"><div><b>Версия</b><small>${VERSION}</small></div></div>
-      <div class="item"><div><b>Черновики на телефоне</b><small>${store.keys('draft:').length}</small></div></div>
+      <div class="item"><div><b>Черновики на телефоне</b><small>${store.keys(draftPrefix()).length}</small></div></div>
     </div>
     <button class="btn block danger" data-act="cache-clear">Очистить кэш (черновики останутся)</button>`;
 }
@@ -751,7 +754,7 @@ function markDirty() {
 function persistDraft() {
   const d = state.draft;
   if (!d || !d.dirty) return;
-  store.set('draft:' + state.week.sheetName, { rows: d.rows, summary: d.summary, baseVersion: d.baseVersion, savedAt: d.savedAt });
+  store.set(draftPrefix() + state.week.sheetName, { rows: d.rows, summary: d.summary, baseVersion: d.baseVersion, savedAt: d.savedAt });
 }
 
 function renderSaveBar() {
@@ -785,7 +788,7 @@ async function save(opts = {}) {
       sheetName: w.sheetName, rows: rowsForSave(), summary: d.summary.replace(/\s+$/, ''),
       baseVersion: d.baseVersion, force: !!opts.force, expand: !!opts.expand,
     }));
-    store.del('draft:' + w.sheetName);
+    store.del(draftPrefix() + w.sheetName);
     setWeek(week);
     state.weeks = null;
     state.historyFresh = false;
@@ -804,7 +807,7 @@ async function save(opts = {}) {
       });
       if (choice === 'force') return save({ ...opts, force: true });
       if (choice === 'theirs') {
-        store.del('draft:' + w.sheetName);
+        store.del(draftPrefix() + w.sheetName);
         setWeek(e.data);
         render();
       }
@@ -831,26 +834,26 @@ let syncing = false;
 async function syncDrafts({ manual = false } = {}) {
   if (syncing || !state.cfg.url) return null;
   const [page, openName] = route();
-  const names = store.keys('draft:').map(k => k.slice(6)).filter(n => !(page === 'week' && n === openName));
+  const names = store.keys(draftPrefix()).map(k => k.slice(draftPrefix().length)).filter(n => !(page === 'week' && n === openName));
   if (!names.length) return null;
   syncing = true;
   const res = { sent: [], conflicts: [], offline: false };
   try {
     for (const name of names) {
-      const d = store.get('draft:' + name, null);
+      const d = store.get(draftPrefix() + name, null);
       if (!d || (d.conflict && !manual)) continue;
       try {
         const week = await api('saveWeek', {
           sheetName: name, rows: rowsForSave(d.rows), summary: String(d.summary || '').replace(/\s+$/, ''), baseVersion: d.baseVersion,
         });
-        store.del('draft:' + name);
+        store.del(draftPrefix() + name);
         store.set('cache:week:' + name, week);
         if (state.week && state.week.sheetName === name) setWeek(week);
         res.sent.push(name);
       } catch (e) {
         if (isOffline(e)) { res.offline = true; break; }
         if (e.code === 'CONFLICT') {
-          store.set('draft:' + name, { ...d, conflict: true });
+          store.set(draftPrefix() + name, { ...d, conflict: true });
           res.conflicts.push(name);
         } else {
           toast(`«${name}»: ${e.message}`);
@@ -922,7 +925,7 @@ const ACTS = {
   carry: async () => {
     const w = state.week;
     const res = await busy(() => api('ensureWeek', { date: w.start, carryOver: true }));
-    store.del('draft:' + w.sheetName);
+    store.del(draftPrefix() + w.sheetName);
     setWeek(res.week);
     state.weeks = null;
     toast(res.carried ? 'Объекты перенесены и записаны в таблицу' : 'Неделя уже заполнена');
@@ -1066,7 +1069,7 @@ const ACTS = {
 
   discard: async () => {
     if (!await confirmModal('Отменить правки?', 'Черновик на телефоне удалится, останется версия из таблицы.', 'Отменить правки')) return;
-    store.del('draft:' + state.week.sheetName);
+    store.del(draftPrefix() + state.week.sheetName);
     setWeek(state.week, state.offline);
     render();
   },

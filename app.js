@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.7.1';
+const VERSION = '0.7.3';
 
 // ---------- Утилиты ----------
 
@@ -342,23 +342,27 @@ function renderRow(i) {
       </div>
       <small class="hint" id="delta">${prev ? `Прошлая неделя: ${fmtPct(prev.readiness)} ${delta(r)}` : ''}</small></div>
     <div class="field"><label>Текущий этап</label>
-      <textarea data-f="stage" rows="1">${esc(r.stage)}</textarea></div>
+      <textarea data-f="stage" rows="1">${esc(r.stage)}</textarea>${prevHtml('stage')}</div>
     <div class="field"><span class="label">Выполнено на этой неделе</span>
       ${listEditor('done', r.done)}
       ${prev && lines(prev.plan).length ? `<button class="btn small" data-act="take-plan">↓ Взять план прошлой недели (${lines(prev.plan).length})</button>` : ''}</div>
     <div class="field"><label>Объём / ед.</label>
-      <textarea data-f="volume" rows="1" placeholder="лента 90 п.м.">${esc(r.volume)}</textarea></div>
+      <textarea data-f="volume" rows="1" placeholder="лента 90 п.м.">${esc(r.volume)}</textarea>${prevHtml('volume')}</div>
     <div class="field"><span class="label">План на следующую неделю</span>
-      ${listEditor('plan', r.plan)}</div>
+      ${listEditor('plan', r.plan)}${prevHtml('plan')}</div>
     <div class="field"><label>Комментарий</label>
-      <textarea data-f="comment" rows="2">${esc(r.comment)}</textarea>
+      <textarea data-f="comment" rows="2">${esc(r.comment)}</textarea>${prevHtml('comment')}
       <button class="btn small" data-act="comment-date" style="margin-top:8px">+ Запись от ${todayDm()}</button></div>
     <div class="field" id="photo">${photoHtml(r)}</div>
     ${r.object ? `<a class="list item" href="${hash('object', r.object)}"><div><b>История объекта</b><small>график готовности и все недели</small></div><span class="chev">›</span></a>` : ''}`;
   $$('#view textarea').forEach(grow);
   // Подсказкам нужна история объектов; если её ещё нет на телефоне — подгрузить в фоне.
   if (!state.history) {
-    refreshHistory().then(() => { if (route()[2] === 'row') refreshSugg(); }).catch(() => { /* без подсказок */ });
+    refreshHistory().then(() => {
+      if (route()[2] !== 'row') return;
+      refreshSugg();
+      refreshPrev();
+    }).catch(() => { /* без подсказок */ });
   }
 }
 
@@ -398,6 +402,35 @@ function suggHtml(name, typed) {
   const items = suggestions(name, typed);
   return `<div class="sugg" data-sugg="${name}">${items.map(t =>
     `<button class="chip" data-act="sugg-add" data-v="${esc(t)}">+ ${esc(t)}</button>`).join('')}</div>`;
+}
+
+/** Запись объекта за последнюю неделю перед открытой — из истории на телефоне. */
+function prevEntry() {
+  const row = currentRow();
+  if (!row || !row.object || !state.history || !state.week) return null;
+  for (let i = state.history.length - 1; i >= 0; i--) {
+    const w = state.history[i];
+    if (w.start >= state.week.start) continue;
+    const r = w.rows.find(x => x.object === row.object);
+    if (r) return r;
+  }
+  return null;
+}
+
+/** «Прошлая неделя: …» с кнопкой «Взять» — только если там есть текст и он отличается от текущего. */
+function prevHtml(field) {
+  const prev = prevEntry();
+  const row = currentRow();
+  const text = prev ? String(prev[field] || '').trim() : '';
+  const show = text && row && text !== String(row[field] || '').trim();
+  const more = lines(text).length > 1 ? ` (+${lines(text).length - 1})` : '';
+  return `<div class="prev" data-prev="${field}">${show
+    ? `<small>Прошлая неделя: ${esc(firstLine(text))}${more}</small><button class="btn small ghost" data-act="copy-prev" data-field="${field}">Взять</button>`
+    : ''}</div>`;
+}
+
+function refreshPrev() {
+  $$('[data-prev]').forEach(el => { el.outerHTML = prevHtml(el.dataset.prev); });
 }
 
 function refreshSugg() {
@@ -870,6 +903,9 @@ async function renderSettings(seq) {
     <div class="list">
       <div class="item"><div><b>Версия</b><small>${VERSION}</small></div></div>
       <div class="item"><div><b>Черновики на телефоне</b><small>${store.keys(draftPrefix()).length}</small></div></div>
+      ${s.lastBackup
+        ? `<a class="item" href="${esc(s.lastBackup.folderUrl)}" target="_blank" rel="noopener"><div><b>Резервная копия таблицы</b><small>последняя: ${esc(s.lastBackup.at)} · папка «Отчёты — архив»</small></div><span class="chev">›</span></a>`
+        : '<div class="item"><div><b>Резервная копия таблицы</b><small>не включена — запустите setupBackup() в скрипте таблицы</small></div></div>'}
     </div>
     <button class="btn block danger" data-act="cache-clear">Очистить кэш (черновики останутся)</button>`;
 }
@@ -1163,6 +1199,25 @@ const ACTS = {
   },
 
   'month-print': () => window.print(),
+
+  'copy-prev': async el => {
+    const field = el.dataset.field;
+    const r = currentRow();
+    const prev = prevEntry();
+    if (!r || !prev) return;
+    const text = String(prev[field] || '').replace(/\s+$/, '');
+    if (String(r[field] || '').trim() && !await confirmModal('Заменить текст?', 'В поле уже есть текст — заменить его текстом прошлой недели?', 'Заменить')) return;
+    r[field] = text;
+    markDirty();
+    if (field === 'plan') {
+      rerenderList('plan');
+    } else {
+      const t = $(`[data-f="${field}"]`);
+      t.value = text;
+      grow(t);
+    }
+    refreshPrev();
+  },
 
   'sugg-add': el => {
     const list = el.closest('[data-list]');

@@ -200,6 +200,11 @@ select {
 .list-ed .li textarea { flex: 1; }
 .list-ed .li .btn { min-width: 40px; padding: 0; }
 
+.prev { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.prev:empty { display: none; }
+.prev small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prev .btn { min-height: 30px; }
+
 .sugg { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .sugg:empty { display: none; }
 .chip {

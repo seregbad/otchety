@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
 // ---------- Утилиты ----------
 
@@ -109,6 +109,7 @@ async function render() {
     }
     if (page === 'objects') return await renderObjects(seq);
     if (page === 'object') return await renderObject(a, seq);
+    if (page === 'month') return await renderMonth(a, seq);
     if (page === 'dirs') return await renderDirs(a === 'contractors' ? 'contractors' : 'objects', seq);
     if (page === 'settings') return await renderSettings(seq);
     go('weeks');
@@ -174,12 +175,39 @@ function weeksHtml(weeks, offline) {
 
 // ---------- Неделя ----------
 
+/** Неделя из памяти телефона открывается сразу, свежая версия из таблицы подтягивается в фоне. */
 async function loadWeek(name) {
   if (state.week && state.week.sheetName === name) return;
+  const saved = store.get('cache:week:' + name, null);
+  if (saved) {
+    setWeek(saved);
+    refreshWeek(name);
+    return;
+  }
   setBar({ title: name, back: '#/weeks' });
   $('#view').innerHTML = loading();
   const { data, offline } = await cached('cache:week:' + name, 'getWeek', { sheetName: name });
   setWeek(data, offline);
+}
+
+async function refreshWeek(name) {
+  state.refreshing = name;
+  try {
+    const fresh = await api('getWeek', { sheetName: name });
+    store.set('cache:week:' + name, fresh);
+    if (!state.week || state.week.sheetName !== name) return;
+    // Черновик не трогаем: если лист за это время изменили, сохранение покажет конфликт.
+    if (!state.draft.dirty) setWeek(fresh);
+    else state.week.previous = fresh.previous || state.week.previous;
+    state.offline = false;
+  } catch (e) {
+    if (isOffline(e) && state.week && state.week.sheetName === name) state.offline = true;
+  } finally {
+    state.refreshing = null;
+    // Перерисовываем только обзор недели — открытая карточка объекта не дёргается под пальцами.
+    const [page, n, sub] = route();
+    if (page === 'week' && n === name && !sub) render();
+  }
 }
 
 /** Неделя с сервера + несохранённый черновик, если он есть. */
@@ -217,12 +245,16 @@ function delta(r) {
 }
 
 /** Те же правила, что у формул листа: COUNTA по объектам, AVERAGE по готовности, COUNTIF по статусам. */
+/** «Не назначен», «Не требуется» и «Отменено» не считаются в работе и не входят в среднюю — как формулы листа. */
+const NOT_ACTIVE = ['Не назначен', 'Не требуется', 'Отменено'];
+
 function stats(rows) {
-  const nums = rows.map(r => r.readiness).filter(v => v !== null && v !== '' && v !== undefined);
+  const active = rows.filter(r => !NOT_ACTIVE.includes(r.status));
+  const nums = active.map(r => r.readiness).filter(v => v !== null && v !== '' && v !== undefined);
   const counts = {};
   rows.forEach(r => { if (r.status) counts[r.status] = (counts[r.status] || 0) + 1; });
   return {
-    count: rows.filter(r => r.object).length,
+    count: active.filter(r => r.object).length,
     avg: nums.length ? nums.reduce((a, b) => a + Number(b), 0) / nums.length : 0,
     counts,
   };
@@ -232,7 +264,7 @@ function renderWeek() {
   const w = state.week;
   const d = state.draft;
   setBar({
-    title: w.sheetName, sub: `Неделя ${w.weekNumber} · ${dm(w.start)}–${dm(w.end)}`, back: '#/weeks',
+    title: w.sheetName, sub: `Неделя ${w.weekNumber} · ${dm(w.start)}–${dm(w.end)}${state.refreshing === w.sheetName ? ' · обновляю…' : ''}`, back: '#/weeks',
     right: d.rows.length ? '<button class="bar-btn text" data-act="pdf">PDF</button>' : '',
   });
   const s = stats(d.rows);
@@ -242,7 +274,7 @@ function renderWeek() {
   $('#view').innerHTML = `
     ${state.offline ? '<div class="banner">Нет связи — показана сохранённая версия. Правки останутся черновиком.</div>' : ''}
     <div class="stats">
-      <div><b>${s.count}</b><small>объектов</small></div>
+      <div><b>${s.count}</b><small>в работе</small></div>
       <div><b>${fmtPct(Math.round(s.avg * 10) / 10)}</b><small>ср. готовность</small></div>
       <div><b>${w.formedDate ? dm(w.formedDate) : '—'}</b><small>сформирован</small></div>
     </div>
@@ -324,6 +356,10 @@ function renderRow(i) {
     <div class="field" id="photo">${photoHtml(r)}</div>
     ${r.object ? `<a class="list item" href="${hash('object', r.object)}"><div><b>История объекта</b><small>график готовности и все недели</small></div><span class="chev">›</span></a>` : ''}`;
   $$('#view textarea').forEach(grow);
+  // Подсказкам нужна история объектов; если её ещё нет на телефоне — подгрузить в фоне.
+  if (!state.history) {
+    refreshHistory().then(() => { if (route()[2] === 'row') refreshSugg(); }).catch(() => { /* без подсказок */ });
+  }
 }
 
 function listEditor(name, text) {
@@ -331,7 +367,44 @@ function listEditor(name, text) {
   return `<div class="list-ed" data-list="${name}">
     ${items.map((t, k) => `<div class="li"><textarea rows="1" data-li="${k}">${esc(t)}</textarea><button class="btn ghost" data-act="li-del" data-k="${k}" aria-label="Удалить пункт">×</button></div>`).join('')}
     <div class="li"><textarea rows="1" data-li-new placeholder="Новый пункт…"></textarea><button class="btn" data-act="li-add" aria-label="Добавить пункт">+</button></div>
+    ${suggHtml(name)}
   </div>`;
+}
+
+/** Пункты, которые уже встречались у объекта в «Выполнено» и «Плане»; частые — первыми. */
+function suggestions(field, typed) {
+  const row = currentRow();
+  if (!row || !row.object || !state.history) return [];
+  const freq = new Map();
+  state.history.forEach(w => w.rows.forEach(r => {
+    if (r.object !== row.object) return;
+    [...lines(r.done), ...lines(r.plan)].forEach(t => {
+      const item = t.replace(/\s+/g, ' ');
+      if (item.length < 3) return;
+      // Пункты из того же поля весят больше: «Выполнено» подсказывает выполненное, «План» — планы.
+      freq.set(item, (freq.get(item) || 0) + (lines(r[field]).includes(t) ? 2 : 1));
+    });
+  }));
+  const have = new Set(lines(row[field]).map(s => s.toLowerCase()));
+  const q = String(typed || '').trim().toLowerCase();
+  return [...freq]
+    .filter(([k]) => !have.has(k.toLowerCase()) && (!q || k.toLowerCase().includes(q)))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([k]) => k);
+}
+
+function suggHtml(name, typed) {
+  const items = suggestions(name, typed);
+  return `<div class="sugg" data-sugg="${name}">${items.map(t =>
+    `<button class="chip" data-act="sugg-add" data-v="${esc(t)}">+ ${esc(t)}</button>`).join('')}</div>`;
+}
+
+function refreshSugg() {
+  $$('[data-sugg]').forEach(el => {
+    const input = $('[data-li-new]', el.closest('[data-list]'));
+    el.outerHTML = suggHtml(el.dataset.sugg, input && input.value);
+  });
 }
 
 function rerenderList(name, focusNew) {
@@ -504,6 +577,7 @@ async function renderObjects(seq) {
 
     $('#view').innerHTML = `
       ${stale ? '<div class="banner">Обновляю данные из таблицы…</div>' : ''}
+      <a class="list item" href="${hash('month', ymd(new Date()).slice(0, 7))}" style="margin-bottom:12px"><div><b>Сводка за месяц</b><small>готовность на начало и конец, что сделано, задержки</small></div><span class="chev">›</span></a>
       <div class="filters">
         <select data-filter="period" aria-label="Период">${Object.entries(PERIODS).map(([k, v]) => `<option value="${k}" ${f.period === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
         <select data-filter="status" aria-label="Статус" class="${f.status ? 'set' : ''}">
@@ -576,6 +650,115 @@ function timelineCard(e, prev) {
       ${photos ? `<div class="kv"><span>Фото</span><p>${photos}</p></div>` : ''}
       <div class="kv"><a href="${hash('week', e.week.sheetName)}">Открыть неделю ›</a></div>
     </div>`;
+}
+
+// ---------- Сводка за месяц ----------
+
+const MONTH_NAMES = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+
+const parseYmd = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const shiftMonth = (ym, n) => { const d = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 1 + n, 1); return ymd(d).slice(0, 7); };
+const hasNum = v => v !== null && v !== undefined && v !== '';
+
+/** Неделя относится к месяцу своего четверга — как в номерах недель ISO. */
+function weekMonth(w) {
+  const d = parseYmd(w.start);
+  d.setDate(d.getDate() + 3);
+  return ymd(d).slice(0, 7);
+}
+
+function monthSummary(history, ym) {
+  const weeks = history.filter(w => weekMonth(w) === ym);
+  const before = history.filter(w => weeks.length && w.start < weeks[0].start);
+  const map = new Map();
+  weeks.forEach(w => w.rows.forEach(r => {
+    if (!map.has(r.object)) map.set(r.object, []);
+    map.get(r.object).push({ ...r, week: w });
+  }));
+  const prevOf = name => {
+    for (let i = before.length - 1; i >= 0; i--) {
+      const r = before[i].rows.find(x => x.object === name);
+      if (r) return r;
+    }
+    return null;
+  };
+  const objects = [...map].map(([name, entries]) => {
+    const prev = prevOf(name);
+    const last = entries[entries.length - 1];
+    const startR = prev && hasNum(prev.readiness) ? prev.readiness : (hasNum(entries[0].readiness) ? entries[0].readiness : null);
+    const endR = hasNum(last.readiness) ? last.readiness : null;
+    const done = [];
+    entries.forEach(e => lines(e.done).forEach(t => { if (!done.includes(t)) done.push(t); }));
+    return {
+      name, entries, last,
+      startR, endR,
+      growth: startR !== null && endR !== null ? Math.round((endR - startR) * 10) / 10 : null,
+      problemWeeks: entries.filter(e => PROBLEM.includes(e.status)).length,
+      done,
+      comments: entries.filter(e => firstLine(e.comment)).map(e => `${dm(e.week.start)}: ${lines(e.comment).join('; ')}`),
+    };
+  });
+  const growths = objects.map(o => o.growth).filter(g => g !== null);
+  return {
+    ym, weeks, objects,
+    avgGrowth: growths.length ? Math.round(growths.reduce((a, b) => a + b, 0) / growths.length * 10) / 10 : null,
+    problemObjects: objects.filter(o => o.problemWeeks).length,
+  };
+}
+
+const monthTitle = ym => `${MONTH_NAMES[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
+const signed = v => (v === null ? '—' : (v > 0 ? '+' : '') + v);
+
+async function renderMonth(ym, seq) {
+  ym = /^\d{4}-\d{2}$/.test(ym || '') ? ym : ymd(new Date()).slice(0, 7);
+  setBar({ title: 'Сводка за месяц', back: '#/objects' });
+  await withHistory(seq, (history, stale) => {
+    const s = monthSummary(history, ym);
+    state.monthText = monthText(s);
+    const range = s.weeks.length ? `недели ${s.weeks[0].weekNumber}–${s.weeks[s.weeks.length - 1].weekNumber}` : 'нет отчётов';
+    setBar({ title: 'Сводка за месяц', sub: `${monthTitle(ym)} · ${range}`, back: '#/objects' });
+    $('#view').innerHTML = `
+      ${stale ? '<div class="banner no-print">Обновляю данные из таблицы…</div>' : ''}
+      <div class="seg no-print">
+        <a href="${hash('month', shiftMonth(ym, -1))}">‹ ${MONTH_NAMES[Number(shiftMonth(ym, -1).slice(5, 7)) - 1]}</a>
+        <a class="on">${monthTitle(ym)}</a>
+        <a href="${hash('month', shiftMonth(ym, 1))}">${MONTH_NAMES[Number(shiftMonth(ym, 1).slice(5, 7)) - 1]} ›</a>
+      </div>
+      <h1 class="print-only">Сводка за ${monthTitle(ym)} · ${range}</h1>
+      <div class="stats">
+        <div><b>${s.objects.length}</b><small>объектов</small></div>
+        <div><b>${signed(s.avgGrowth)}</b><small>средний прирост</small></div>
+        <div><b>${s.problemObjects}</b><small>с задержками</small></div>
+      </div>
+      ${s.objects.length ? `<div class="row-btns no-print" style="margin-bottom:12px">
+        <button class="btn" data-act="month-share">Поделиться текстом</button>
+        <button class="btn primary" data-act="month-print">Печать / PDF</button>
+      </div>` : '<div class="empty">За этот месяц отчётов нет</div>'}
+      <div class="tl">${s.objects.map(o => `
+        <div class="card">
+          <div class="card-top"><h3>${esc(o.name)}</h3><span class="status ${STATUS_CLASS[o.last.status] || ''}">${esc(o.last.status || '—')}</span></div>
+          <div class="meta">
+            <span>Готовность: <b>${fmtPct(o.startR)} → ${fmtPct(o.endR)}</b> ${deltaHtml(o.growth)}</span>
+            <span>${o.entries.length} ${weeksWord(o.entries.length)} в отчётах</span>
+            ${o.problemWeeks ? `<span class="attention">${o.problemWeeks} ${weeksWord(o.problemWeeks)} в ожидании/простое</span>` : ''}
+            ${o.last.contractor ? `<span>${esc(o.last.contractor)}</span>` : ''}
+          </div>
+          ${o.done.length ? `<div class="kv"><span>Сделано за месяц</span><ul>${o.done.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
+          ${o.comments.length ? `<div class="kv"><span>Комментарии</span><p>${o.comments.map(esc).join('\n')}</p></div>` : ''}
+          <div class="kv no-print"><a href="${hash('object', o.name)}">История объекта ›</a></div>
+        </div>`).join('')}</div>`;
+  });
+}
+
+function monthText(s) {
+  const head = `Сводка за ${monthTitle(s.ym)}` + (s.weeks.length ? ` (недели ${s.weeks[0].weekNumber}–${s.weeks[s.weeks.length - 1].weekNumber})` : '');
+  const body = s.objects.map(o => [
+    `${o.name} — ${o.last.status || 'без статуса'}, готовность ${fmtPct(o.startR)} → ${fmtPct(o.endR)} (${signed(o.growth)})` +
+      (o.problemWeeks ? `, ${o.problemWeeks} ${weeksWord(o.problemWeeks)} в ожидании/простое` : ''),
+    ...(o.done.length ? ['Сделано: ' + o.done.join('; ')] : []),
+    ...(o.comments.length ? ['Комментарии: ' + o.comments.join(' | ')] : []),
+  ].join('\n')).join('\n\n');
+  return `${head}\n\n${body}`;
 }
 
 const CH = { W: 340, H: 170, L: 34, R: 14, T: 16, B: 26 };
@@ -969,6 +1152,26 @@ const ACTS = {
     rerenderList(list.dataset.list, true);
   },
 
+  'month-share': async () => {
+    const text = state.monthText || '';
+    if (navigator.share) {
+      await navigator.share({ title: text.split('\n')[0], text }).catch(() => { /* окно закрыли */ });
+    } else {
+      await navigator.clipboard.writeText(text);
+      toast('Текст сводки скопирован');
+    }
+  },
+
+  'month-print': () => window.print(),
+
+  'sugg-add': el => {
+    const list = el.closest('[data-list]');
+    const r = currentRow();
+    r[list.dataset.list] = lines(r[list.dataset.list]).concat(el.dataset.v).join('\n');
+    markDirty();
+    rerenderList(list.dataset.list, true);
+  },
+
   'li-del': el => {
     const list = el.closest('[data-list]');
     const r = currentRow();
@@ -1202,6 +1405,12 @@ document.addEventListener('input', ev => {
     }
     markDirty();
     if (f === 'object') renderRow(Number(route()[3]));
+    return;
+  }
+
+  if (t.matches('[data-li-new]')) {
+    const list = t.closest('[data-list]');
+    $('[data-sugg]', list).outerHTML = suggHtml(list.dataset.list, t.value);
     return;
   }
 

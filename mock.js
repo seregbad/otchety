@@ -192,12 +192,13 @@ export async function mockCall(action, params) {
 
 function full(w) {
   const rows = w.rows.map((r, i) => ({ row: 9 + i, ...r }));
-  const nums = rows.map(r => r.readiness).filter(v => v !== null && v !== '');
+  const active = rows.filter(r => !['Не назначен', 'Не требуется', 'Отменено'].includes(r.status));
+  const nums = active.map(r => r.readiness).filter(v => v !== null && v !== '');
   return {
     sheetName: w.sheetName, start: w.start, end: w.end, weekNumber: w.weekNumber,
     title: `${settings.company} · Еженедельный отчёт · Неделя ${w.weekNumber}`,
     engineer: settings.engineer, formedDate: w.formedDate,
-    objectsCount: rows.filter(r => r.object).length,
+    objectsCount: active.filter(r => r.object).length,
     avgReadiness: nums.length ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length * 10) / 10 : 0,
     capacity: w.capacity, rows,
     statusCounts: dirs.statuses.map(s => ({ status: s, count: rows.filter(r => r.status === s).length })),

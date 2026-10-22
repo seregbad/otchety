@@ -200,6 +200,14 @@ select {
 .list-ed .li textarea { flex: 1; }
 .list-ed .li .btn { min-width: 40px; padding: 0; }
 
+.sugg { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.sugg:empty { display: none; }
+.chip {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: 1px solid var(--line); background: var(--field); color: var(--text);
+  border-radius: 999px; padding: 6px 10px; font: inherit; font-size: 13px; cursor: pointer;
+}
+
 .links .link { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
 .links .link a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .link-add { display: grid; grid-template-columns: 1fr 90px; gap: 6px; margin-top: 8px; }
@@ -271,5 +279,15 @@ select {
 .tl .kv > span { display: block; color: var(--muted); font-size: 12px; }
 .tl .kv ul { margin: 2px 0 0; padding-left: 18px; }
 .tl .kv p { margin: 2px 0 0; white-space: pre-line; }
+
+.print-only { display: none; }
+
+@media print {
+  :root { --bg: #FFFFFF; --card: #FFFFFF; --text: #000000; --muted: #444444; --line: #CCCCCC; color-scheme: light; }
+  .bar, .tabs, .savebar, .toast, .busy, .modal, .no-print { display: none !important; }
+  .print-only { display: block; font-size: 18px; margin: 0 0 12px; }
+  .view { padding: 0; max-width: none; }
+  .card, .stats > div { box-shadow: none; border: 1px solid var(--line); break-inside: avoid; }
+}
 
 .skeleton { height: 64px; border-radius: var(--radius); background: var(--card); margin-bottom: 10px; opacity: .6; }

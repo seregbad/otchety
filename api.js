@@ -16,7 +16,21 @@ export const isOffline = e => e && (e.code === 'OFFLINE' || e.code === 'TIMEOUT'
  * который Apps Script принимает.
  */
 export function createApi(getCfg) {
+  /**
+   * Изредка Google теряет тело запроса на перенаправлении, и ответ приходит как на пустой GET
+   * (NO_ACTION) или не JSON. Такой запрос до скрипта не дошёл — его можно спокойно повторить один раз.
+   */
   return async function call(action, params = {}) {
+    try {
+      return await once(action, params);
+    } catch (e) {
+      if (e.code !== 'NO_ACTION' && e.code !== 'BAD_RESPONSE') throw e;
+      await new Promise(r => setTimeout(r, 800));
+      return once(action, params);
+    }
+  };
+
+  async function once(action, params) {
     const { url, key } = getCfg();
     if (!url) throw new ApiError({ code: 'NO_CONFIG', message: 'Не настроено подключение к таблице' });
     if (url === 'demo') return mockCall(action, params);
@@ -50,5 +64,5 @@ export function createApi(getCfg) {
     }
     if (!json.ok) throw new ApiError(json.error);
     return json.data;
-  };
+  }
 }

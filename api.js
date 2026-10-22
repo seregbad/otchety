@@ -19,12 +19,14 @@ export function createApi(getCfg) {
   /**
    * Изредка Google теряет тело запроса на перенаправлении, и ответ приходит как на пустой GET
    * (NO_ACTION) или не JSON. Такой запрос до скрипта не дошёл — его можно спокойно повторить один раз.
+   * STALE: скрипт заметил переименованный лист и сбросил список листов до того, как что-то записал.
    */
   return async function call(action, params = {}) {
     try {
       return await once(action, params);
     } catch (e) {
-      if (e.code !== 'NO_ACTION' && e.code !== 'BAD_RESPONSE') throw e;
+      // STALE — скрипт заметил, что листы переименовали, и уже пересобрал список: повтор пройдёт.
+      if (e.code !== 'NO_ACTION' && e.code !== 'BAD_RESPONSE' && e.code !== 'STALE') throw e;
       await new Promise(r => setTimeout(r, 800));
       return once(action, params);
     }

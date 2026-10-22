@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.7.0';
+const VERSION = '0.7.1';
 
 // ---------- Утилиты ----------
 

@@ -1,6 +1,6 @@
 import { createApi, isOffline } from './api.js';
 
-const VERSION = '0.8.1';
+const VERSION = '0.10.0';
 
 // ---------- Утилиты ----------
 
@@ -127,6 +127,7 @@ async function render() {
     if (page === 'objects') return await renderObjects(seq);
     if (page === 'object') return await renderObject(a, seq);
     if (page === 'month') return await renderMonth(a, seq);
+    if (page === 'dirs' && readOnly()) return go('weeks');
     if (page === 'dirs') return await renderDirs(a === 'contractors' ? 'contractors' : 'objects', seq);
     if (page === 'settings') return await renderSettings(seq);
     go('weeks');
@@ -138,10 +139,16 @@ async function render() {
   }
 }
 
+/** Ключ руководства: всё видно, ничего нельзя изменить (запрет проверяет и скрипт таблицы). */
+const readOnly = () => state.cfg.role === 'viewer';
+
 function setTabs(page) {
   const top = ['weeks', 'objects', 'dirs', 'settings'].includes(page) && state.cfg.url;
   $('#tabs').hidden = !top;
-  $$('#tabs a').forEach(a => a.classList.toggle('on', a.dataset.tab === page));
+  $$('#tabs a').forEach(a => {
+    a.classList.toggle('on', a.dataset.tab === page);
+    a.hidden = a.dataset.tab === 'dirs' && readOnly();
+  });
 }
 
 function setBar({ title, sub = '', back = '', right = '' }) {
@@ -235,7 +242,7 @@ const loading = () => '<div class="skeleton"></div><div class="skeleton"></div><
 // ---------- Недели ----------
 
 async function renderWeeks(seq) {
-  setBar({ title: 'Отчёты', sub: state.cfg.url === 'demo' ? 'демо-режим' : '' });
+  setBar({ title: 'Отчёты', sub: [state.cfg.url === 'demo' ? 'демо-режим' : '', readOnly() ? 'только просмотр' : ''].filter(Boolean).join(' · ') });
   const view = $('#view');
   view.innerHTML = state.weeks ? weeksHtml(state.weeks, false) : loading();
   const { data, offline } = await cached('cache:weeks', 'listWeeks');
@@ -263,10 +270,10 @@ function weeksHtml(weeks, offline) {
     ${drafts.size ? `<div class="banner">
       Не отправлено в таблицу: ${[...drafts].map(esc).join(', ')}${conflicts.length ? `<br>Лист изменили в таблице: ${conflicts.map(esc).join(', ')} — откройте неделю и выберите версию` : ''}
       <button class="btn small" data-act="sync-drafts" style="margin-top:8px; width:100%">Отправить сейчас</button></div>` : ''}
-    <button class="btn primary block" data-act="open-current">Открыть текущую неделю</button>
+    <button class="btn primary block" data-act="open-current">${readOnly() ? 'Открыть последний отчёт' : 'Открыть текущую неделю'}</button>
     <h2>Отчёты</h2>
     <div class="list">${shown.map(item).join('') || '<div class="empty">Пока пусто</div>'}</div>
-    ${empty.length ? `<details class="more"><summary>Пустые заготовки (${empty.length})</summary><div class="list">${empty.map(item).join('')}</div></details>` : ''}`;
+    ${empty.length && !readOnly() ? `<details class="more"><summary>Пустые заготовки (${empty.length})</summary><div class="list">${empty.map(item).join('')}</div></details>` : ''}`;
 }
 
 // ---------- Неделя ----------
@@ -292,9 +299,10 @@ async function refreshWeek(name) {
     const fresh = await api('getWeek', { sheetName: name });
     store.set('cache:week:' + name, fresh);
     if (!state.week || state.week.sheetName !== name) return;
-    // Черновик не трогаем: если лист за это время изменили, сохранение покажет конфликт.
+    // Черновик не трогаем: если лист за это время изменили, сохранение покажет конфликт
+    // (версия для проверки хранится в черновике). Свежая неделя нужна ради комментариев руководства.
     if (!state.draft.dirty) setWeek(fresh);
-    else state.week.previous = fresh.previous || state.week.previous;
+    else state.week = { ...fresh, previous: fresh.previous || state.week.previous };
     state.offline = false;
   } catch (e) {
     if (isOffline(e) && state.week && state.week.sheetName === name) state.offline = true;
@@ -378,10 +386,10 @@ function renderWeek() {
     ${d.rows.length ? '' : `
       <div class="empty">
         <p>В этой неделе пока нет объектов.</p>
-        ${prev ? `<button class="btn primary" data-act="carry">Перенести объекты с недели «${esc(prev.sheetName)}»</button>` : ''}
+        ${prev && !readOnly() ? `<button class="btn primary" data-act="carry">Перенести объекты с недели «${esc(prev.sheetName)}»</button>` : ''}
       </div>`}
     <div class="cards">${d.rows.map((r, i) => cardHtml(r, i)).join('')}</div>
-    <button class="btn block" data-act="add-row">+ Объект</button>
+    ${readOnly() ? '' : '<button class="btn block" data-act="add-row">+ Объект</button>'}
     <h2>Итог недели</h2>
     <a class="list item" href="${hash('week', w.sheetName, 'summary')}">
       <div><b>${esc(firstLine(d.summary) || 'Не заполнен')}</b>${lines(d.summary).length > 1 ? `<small>ещё ${lines(d.summary).length - 1} стр.</small>` : ''}</div>
@@ -389,10 +397,50 @@ function renderWeek() {
     </a>`;
 }
 
+/**
+ * Переписка по объекту — из недели с сервера (в черновик она не входит). Только что отправленное
+ * хранится отдельно: фоновое обновление недели, начатое до отправки, могло бы его затереть.
+ */
+const sentComments = {};
+
+function commentsFor(object) {
+  if (!object || !state.week) return [];
+  const row = state.week.rows.find(r => r.object === object);
+  const server = (row && row.comments) || [];
+  const sent = sentComments[`${state.week.sheetName}|${object}`] || [];
+  return sent.length > server.length ? sent : server;
+}
+
+/** Ждёт ответа: последнее сообщение не от того, кто сейчас смотрит. */
+function commentBadge(object) {
+  const c = commentsFor(object);
+  if (!c.length) return '';
+  const last = c[c.length - 1];
+  const waiting = readOnly() ? last.mine : !last.mine;
+  return waiting
+    ? `<span class="pill cmt-new">💬 ${readOnly() ? 'есть ответ' : 'ждёт ответа'}</span>`
+    : `<span class="pill">💬 ${c.length}</span>`;
+}
+
+function commentsHtml(object) {
+  if (!object) return '';
+  const inSheet = state.week && state.week.rows.some(r => r.object === object);
+  const list = commentsFor(object);
+  return `<div class="field mgmt" id="comments">
+    <span class="label">💬 Комментарии руководства</span>
+    ${list.map(m => `<div class="msg ${m.mine ? 'mine' : ''}"><small>${esc(m.mine ? (readOnly() ? 'Инженер ТН' : 'Вы') : (m.who || 'Комментарий'))}${m.at ? ' · ' + esc(m.at.slice(0, 5)) : ''}</small><p>${esc(m.text)}</p></div>`).join('')
+      || `<small class="hint">${readOnly() ? 'Здесь можно задать вопрос инженеру по этому объекту.' : 'Пока комментариев нет.'}</small>`}
+    ${inSheet
+      ? `<textarea id="comment-text" rows="2" placeholder="${list.length && !readOnly() ? 'Ответить…' : 'Написать…'}"></textarea>
+         <button class="btn small primary block" data-act="comment-send" data-object="${esc(object)}">Отправить</button>`
+      : '<small class="hint">Сохраните неделю — после этого по объекту можно переписываться.</small>'}
+  </div>`;
+}
+
 function cardHtml(r, i) {
   return `
     <a class="card" href="${hash('week', state.week.sheetName, 'row', i)}">
-      <div class="card-top"><b>${esc(r.object || 'Объект не выбран')}</b><span class="status ${STATUS_CLASS[r.status] || ''}">${esc(r.status || 'без статуса')}</span></div>
+      <div class="card-top"><b>${esc(r.object || 'Объект не выбран')}</b>${commentBadge(r.object)}<span class="status ${STATUS_CLASS[r.status] || ''}">${esc(r.status || 'без статуса')}</span></div>
       <div class="card-mid"><div class="progress"><i style="width:${Number(r.readiness) || 0}%"></i></div><span>${fmtPct(r.readiness)} ${delta(r)}</span></div>
       <div class="card-sub">${esc([firstLine(r.stage), r.contractor].filter(Boolean).join(' · ') || '—')}</div>
     </a>`;
@@ -412,10 +460,44 @@ function options(list, value, hidden = [], used = []) {
     `<option ${v === value ? 'selected' : ''} ${used.includes(v) && v !== value ? 'disabled' : ''}>${esc(v)}</option>`).join('');
 }
 
+/** Блок «подпись — текст» для просмотра: список по строкам или абзац. */
+function kvBlock(label, text, asList) {
+  if (!lines(text).length) return '';
+  return `<div class="kv"><span>${label}</span>${asList
+    ? `<ul>${lines(text).map(t => `<li>${esc(t)}</li>`).join('')}</ul>`
+    : `<p>${esc(String(text).trim())}</p>`}</div>`;
+}
+
+/** Карточка объекта для руководства: те же данные, только текстом. */
+function renderRowView(r) {
+  const w = state.week;
+  const prev = prevRow(r.object);
+  setBar({ title: r.object || 'Объект', sub: w.sheetName, back: hash('week', w.sheetName) });
+  const links = (r.photo && r.photo.links) || [];
+  const photos = links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label && l.label !== l.url ? l.label : 'фото')}</a>`).join(', ');
+  $('#view').innerHTML = `
+    ${commentsHtml(r.object)}
+    <div class="tl"><div class="card">
+      <div class="card-top"><h3>${esc(r.object)}</h3><span class="status ${STATUS_CLASS[r.status] || ''}">${esc(r.status || 'без статуса')}</span></div>
+      <div class="meta">
+        <span>Готовность: <b>${fmtPct(r.readiness)}</b> ${delta(r)}${prev ? ` (прошлая неделя ${fmtPct(prev.readiness)})` : ''}</span>
+        ${r.contractor ? `<span>${esc(r.contractor)}</span>` : ''}
+      </div>
+      ${kvBlock('Текущий этап', r.stage)}
+      ${kvBlock('Выполнено на этой неделе', r.done, true)}
+      ${kvBlock('Объём / ед.', r.volume)}
+      ${kvBlock('План на следующую неделю', r.plan, true)}
+      ${kvBlock('Комментарий', r.comment)}
+      ${photos ? `<div class="kv"><span>Фотоотчёт</span><p>${photos}</p></div>` : ''}
+    </div></div>
+    ${r.object ? `<a class="list item" href="${hash('object', r.object)}" style="margin-top:10px"><div><b>История объекта</b><small>график готовности и все недели</small></div><span class="chev">›</span></a>` : ''}`;
+}
+
 function renderRow(i) {
   const w = state.week;
   const r = state.draft.rows[i];
   if (!r) return go('week', w.sheetName);
+  if (readOnly()) return renderRowView(r);
   const dirs = state.dirs;
   const used = state.draft.rows.map(x => x.object);
   const prev = prevRow(r.object);
@@ -424,6 +506,7 @@ function renderRow(i) {
     right: `<button class="bar-btn text" data-act="del-row">Удалить</button>`,
   });
   $('#view').innerHTML = `
+    ${commentsFor(r.object).length ? commentsHtml(r.object) : ''}
     <div class="field"><label>Объект</label>
       <select data-f="object">${options(dirs.objects, r.object, dirs.hidden.objects, used)}</select></div>
     <div class="field"><label>Статус</label>
@@ -574,6 +657,10 @@ function grow(t) {
 function renderSummary() {
   const w = state.week;
   setBar({ title: 'Итог недели', sub: w.sheetName, back: hash('week', w.sheetName) });
+  if (readOnly()) {
+    $('#view').innerHTML = `<div class="tl"><div class="card">${kvBlock('Итог недели', state.draft.summary, true) || '<p class="empty">Итог недели не заполнен</p>'}</div></div>`;
+    return;
+  }
   $('#view').innerHTML = `
     <div class="field"><label>Итог недели (ячейка «ИТОГ НЕДЕЛИ» на листе)</label>
       <textarea data-sum rows="6">${esc(state.draft.summary)}</textarea></div>
@@ -983,6 +1070,19 @@ async function renderSettings(seq) {
   } catch (e) { /* покажем то, что есть */ }
   if (seq !== renderSeq) return;
   const s = settings || {};
+  if (readOnly()) {
+    $('#view').innerHTML = `
+      <div class="banner">Доступ только для просмотра${s.name ? ` · ${esc(s.name)}` : ''}. Отчёты заполняет инженер ТН.</div>
+      ${connectionHtml()}
+      <h2>Приложение</h2>
+      <div class="list">
+        <div class="item"><div><b>Версия</b><small>${VERSION}</small></div></div>
+        <div class="item"><div><b>Данные из таблицы</b><small>последняя полная синхронизация: ${syncedAtText()}</small></div>
+          <button class="btn small" data-act="force-sync">Синхронизировать</button></div>
+      </div>
+      <button class="btn block danger" data-act="cache-clear">Очистить кэш</button>`;
+    return;
+  }
   $('#view').innerHTML = `
     ${connectionHtml()}
     <h2>Отчёт</h2>
@@ -995,6 +1095,8 @@ async function renderSettings(seq) {
     </div>
     <button class="btn primary block" data-act="settings-save">Сохранить настройки</button>
     ${reminderHtml(s)}
+    <h2>Доступ для руководства</h2>
+    <div id="viewers"><div class="skeleton"></div></div>
     <h2>Приложение</h2>
     <div class="list">
       <div class="item"><div><b>Версия</b><small>${VERSION}</small></div></div>
@@ -1006,6 +1108,39 @@ async function renderSettings(seq) {
         : '<div class="item"><div><b>Резервная копия таблицы</b><small>не включена — запустите setupBackup() в скрипте таблицы</small></div></div>'}
     </div>
     <button class="btn block danger" data-act="cache-clear">Очистить кэш (черновики останутся)</button>`;
+  loadViewers();
+}
+
+// ---------- Ключи «только просмотр» ----------
+
+async function loadViewers() {
+  const box = $('#viewers');
+  if (!box) return;
+  try {
+    box.innerHTML = viewersHtml(await api('listViewers'));
+  } catch (e) {
+    box.innerHTML = `<small>${e.code === 'UNKNOWN_ACTION' ? 'Обновите Api.gs в таблице — в нём ещё нет ключей для руководства.' : esc(e.message)}</small>`;
+  }
+}
+
+function viewersHtml(list) {
+  return `
+    <div class="list">
+      ${list.map(v => `
+        <div class="item">
+          <div><b>${esc(v.name)}</b><small>ключ выдан ${dmy(v.created)}</small></div>
+          <button class="btn small ghost danger" data-act="viewer-remove" data-name="${esc(v.name)}">Отозвать</button>
+        </div>`).join('') || '<div class="item"><div><small>Ключей пока нет</small></div></div>'}
+    </div>
+    <div class="field" style="margin-top:10px"><label>Кому выдать ключ «только просмотр»</label>
+      <input type="text" id="viewer-name" placeholder="РОП Иванов" autocomplete="off">
+      <button class="btn primary block" data-act="viewer-add">Выдать ключ</button>
+      <small class="hint">Руководитель ставит это же приложение и вводит URL и свой ключ. Видит недели, объекты, историю, сводку и PDF и может оставлять комментарии к объектам — изменить отчёт не может. Отозванный ключ перестаёт работать сразу.</small>
+    </div>
+    <div class="field">
+      <label class="switch">Письмо мне о новом комментарии руководства
+        <input type="checkbox" data-notify ${!state.settings || state.settings.notifyComments !== false ? 'checked' : ''}></label>
+    </div>`;
 }
 
 const DAYS = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
@@ -1050,8 +1185,8 @@ function connectionHtml() {
 function renderSetup() {
   setBar({ title: 'Отчёты стройки' });
   $('#view').innerHTML = `
-    <p>Приложение работает с вашей Google-таблицей через скрипт <b>Api.gs</b>.
-    Вставьте URL веб-приложения и ключ доступа из журнала <code>setupApi</code>.</p>
+    <p>Приложение работает с Google-таблицей отчётов. Вставьте URL и ключ доступа:
+    инженер ТН берёт их из скрипта таблицы, руководство — из сообщения с ключом «только просмотр».</p>
     ${connectionHtml()}`;
 }
 
@@ -1060,6 +1195,7 @@ function renderSetup() {
 let draftTimer = null;
 
 function markDirty() {
+  if (readOnly()) return;
   const d = state.draft;
   d.dirty = true;
   d.savedAt = Date.now();
@@ -1077,7 +1213,7 @@ function persistDraft() {
 
 function renderSaveBar() {
   const bar = $('#savebar');
-  const show = route()[0] === 'week' && state.draft && state.draft.dirty;
+  const show = route()[0] === 'week' && state.draft && state.draft.dirty && !readOnly();
   bar.hidden = !show;
   if (!show) return;
   const t = new Date(state.draft.savedAt || Date.now());
@@ -1150,7 +1286,7 @@ let syncing = false;
  * Конфликт оставляет черновик с пометкой — его решают вручную при открытии недели.
  */
 async function syncDrafts({ manual = false } = {}) {
-  if (syncing || !state.cfg.url) return null;
+  if (syncing || !state.cfg.url || readOnly()) return null;
   const [page, openName] = route();
   const names = store.keys(draftPrefix()).map(k => k.slice(draftPrefix().length)).filter(n => !(page === 'week' && n === openName));
   if (!names.length) return null;
@@ -1228,6 +1364,13 @@ const ACTS = {
   'sync-drafts': () => syncDrafts({ manual: true }),
 
   'open-current': async () => {
+    if (readOnly()) {
+      // Руководство листы не создаёт: открываем текущую неделю, если она заполнена, иначе последнюю заполненную.
+      const today = ymd(new Date());
+      const weeks = state.weeks || await busy(() => api('listWeeks'));
+      const w = weeks.find(x => x.start <= today && today <= x.end && x.objectsCount) || weeks.filter(x => x.objectsCount).pop();
+      return w ? go('week', w.sheetName) : toast('Отчётов пока нет');
+    }
     let res;
     try {
       res = await busy(() => api('ensureWeek', { date: ymd(new Date()), carryOver: false }));
@@ -1470,8 +1613,68 @@ const ACTS = {
     if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(cfg.url)) return toast('URL должен быть вида https://script.google.com/…/exec');
     const test = createApi(() => cfg);
     const res = await busy(() => test('ping'));
+    cfg.role = res.role || 'owner';
     applyCfg(cfg);
-    toast('Подключено: ' + res.spreadsheet);
+    toast('Подключено: ' + res.spreadsheet + (cfg.role === 'viewer' ? ' · только просмотр' : ''));
+  },
+
+  'comment-send': async el => {
+    const text = $('#comment-text').value.trim();
+    if (!text) return $('#comment-text').focus();
+    const object = el.dataset.object;
+    const w = state.week;
+    let res;
+    try {
+      res = await busy(() => api('addComment', { sheetName: w.sheetName, object, text }));
+    } catch (e) {
+      if (e.code === 'UNKNOWN_ACTION') return toast('Обновите Api.gs в таблице — в нём ещё нет комментариев');
+      if (isOffline(e)) return toast('Нет связи — комментарий не отправлен, текст остался в поле');
+      throw e;
+    }
+    // Переписка живёт в неделе с сервера и в её кэше на телефоне; черновик не трогаем.
+    sentComments[`${w.sheetName}|${res.object}`] = res.comments;
+    const cur = state.week && state.week.sheetName === w.sheetName ? state.week : w;
+    cur.rows.filter(r => r.object === res.object).forEach(r => { r.comments = res.comments; });
+    store.set('cache:week:' + cur.sheetName, cur);
+    $('#comments').outerHTML = commentsHtml(object);
+    toast(readOnly() ? 'Комментарий отправлен инженеру' : 'Ответ сохранён');
+  },
+
+  'notify-comments': async el => {
+    state.settings = await busy(() => api('saveSettings', { settings: { notifyComments: el.checked } }));
+    store.set('cache:settings', state.settings);
+    toast(el.checked ? 'Письма о комментариях включены' : 'Письма о комментариях выключены');
+  },
+
+  'viewer-add': async () => {
+    const name = $('#viewer-name').value.trim();
+    if (!name) return $('#viewer-name').focus();
+    const res = await busy(() => api('addViewer', { name }));
+    $('#viewers').innerHTML = viewersHtml(res.viewers);
+    const text = `Приложение «Отчёты»: ${location.origin + location.pathname}\n` +
+      `1) Откройте ссылку и установите приложение на телефон.\n` +
+      `2) В настройках введите:\nURL: ${state.cfg.url}\nКлюч: ${res.key}`;
+    const choice = await modal({
+      title: `Ключ для «${res.name}»`,
+      text: `Ключ показывается один раз — отправьте его сейчас.\n\n${text}`,
+      buttons: [
+        { id: 'share', label: 'Отправить (почта, Telegram…)', primary: true },
+        { id: 'copy', label: 'Скопировать' },
+        { id: 'cancel', label: 'Закрыть' },
+      ],
+    });
+    if (choice === 'share' && navigator.share) {
+      await navigator.share({ title: 'Доступ к отчётам', text }).catch(() => { /* окно закрыли */ });
+    } else if (choice === 'share' || choice === 'copy') {
+      await navigator.clipboard.writeText(text).then(() => toast('Скопировано')).catch(() => toast('Не удалось скопировать'));
+    }
+  },
+
+  'viewer-remove': async el => {
+    const name = el.dataset.name;
+    if (!await confirmModal(`Отозвать ключ «${name}»?`, 'Ключ перестанет работать сразу. При необходимости выдадите новый.', 'Отозвать')) return;
+    $('#viewers').innerHTML = viewersHtml(await busy(() => api('removeViewer', { name })));
+    toast('Ключ отозван');
   },
 
   'cfg-demo': () => {
@@ -1546,6 +1749,12 @@ document.addEventListener('click', async ev => {
 document.addEventListener('input', ev => {
   const t = ev.target;
   if (t.matches('textarea')) grow(t);
+
+  // Флажок — через input: обработчик кликов по data-act отменяет действие по умолчанию и не дал бы его переключить.
+  if (t.matches('[data-notify]')) {
+    ACTS['notify-comments'](t).catch(e => toast(e.message));
+    return;
+  }
 
   if (t.dataset.f) {
     const r = currentRow();
@@ -1678,3 +1887,15 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 render();
 setTimeout(() => { if (navigator.onLine) syncDrafts(); }, 2000);
+
+// Роль ключа уточняется при каждом запуске: если ключ поменяли или отозвали — приложение это увидит.
+if (state.cfg.url && state.cfg.url !== 'demo') {
+  api('ping').then(p => {
+    const role = p.role || 'owner';
+    if (role !== (state.cfg.role || 'owner')) {
+      state.cfg = { ...state.cfg, role };
+      store.set('cfg', state.cfg);
+      render();
+    }
+  }).catch(() => { /* без связи — роль прежняя */ });
+}

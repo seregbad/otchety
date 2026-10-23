@@ -116,6 +116,7 @@ h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacin
 .tabs a { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: var(--muted); min-width: 72px; }
 .tabs a span { font-size: 20px; line-height: 1; }
 .tabs a.on { color: var(--accent); }
+.tabs a[hidden] { display: none; }
 
 /* ---------- Списки и карточки ---------- */
 .list { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
@@ -214,6 +215,17 @@ select {
 .list-ed .li { display: flex; gap: 6px; align-items: flex-start; margin-bottom: 6px; }
 .list-ed .li textarea { flex: 1; }
 .list-ed .li .btn { min-width: 40px; padding: 0; }
+
+/* Комментарии руководства */
+.field.mgmt { background: color-mix(in srgb, var(--accent) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.field.mgmt > .label { color: var(--accent); font-weight: 600; }
+.msg { margin: 8px 0; }
+.msg small { display: block; }
+.msg p { margin: 2px 0 0; white-space: pre-line; }
+.msg.mine small { color: var(--up); }
+.field.mgmt textarea { margin-top: 6px; background: var(--card); }
+.pill.cmt-new { background: var(--s-stop); color: var(--s-text); }
+.card-top .pill { flex: none; }
 
 .prev { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .prev:empty { display: none; }

@@ -22,6 +22,15 @@ let settings = {
   appUrl: '',
 };
 
+const viewers = {};   // ключи «только просмотр» в демо
+
+// Комментарии руководства: в таблице это примечания к ячейке объекта, здесь — по ключу «неделя|объект».
+const notes = {
+  'октябрь 19-23|Офис Г': [
+    { who: 'РОП (демо)', at: '22.10.2026 10:15', text: 'Когда закончите монтаж ФЭ? Заказчик спрашивает сроки сдачи.', mine: false },
+  ],
+};
+
 const link = id => ({ text: `https://example.com/f/${id}`, links: [{ label: `https://example.com/f/${id}`, url: `https://example.com/f/${id}` }] });
 const noPhoto = () => ({ text: '', links: [] });
 const row = r => ({
@@ -87,6 +96,24 @@ const actions = {
     return { ...settings, reminderActive: settings.reminder.enabled };
   },
   resetCache: () => ({ done: true }),
+  listViewers: () => Object.keys(viewers).map(name => ({ name, created: viewers[name].created })),
+  addViewer: p => {
+    const name = String(p.name || '').trim();
+    if (!name) throw { code: 'EMPTY', message: 'Укажите, кому выдаётся ключ' };
+    if (viewers[name]) throw { code: 'DUPLICATE', message: 'Ключ для «' + name + '» уже есть' };
+    viewers[name] = { key: 'view', created: ymd(new Date()) };
+    return { name, key: 'view', viewers: actions.listViewers() };
+  },
+  removeViewer: p => { delete viewers[p.name]; return actions.listViewers(); },
+  addComment: p => {
+    const w = weeks[indexOf(p.sheetName)];
+    if (!w.rows.some(r => r.object === p.object)) throw { code: 'NOT_FOUND', message: `Объекта «${p.object}» нет на листе` };
+    const key = `${w.sheetName}|${p.object}`;
+    const d = new Date();
+    const at = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    (notes[key] = notes[key] || []).push({ who: p._viewer ? 'РОП (демо)' : 'Инженер ТН', at, text: String(p.text).trim(), mine: !p._viewer });
+    return { object: p.object, comments: notes[key] };
+  },
   sendTestReminder: () => ({ to: settings.reminder.email || 'demo@example.com' }),
   listWeeks: () => weeks.map(w => ({
     sheetName: w.sheetName, start: w.start, end: w.end, weekNumber: w.weekNumber,
@@ -178,12 +205,19 @@ const actions = {
   },
 };
 
-export async function mockCall(action, params) {
+// Как в скрипте: ключ «view» в демо — руководство, только просмотр.
+const VIEWER_ACTIONS = ['ping', 'getDirectories', 'getSettings', 'listWeeks', 'getWeek', 'getAll', 'getHistory', 'exportPdf', 'resetCache', 'addComment'];
+
+export async function mockCall(action, params, key) {
   await new Promise(r => setTimeout(r, 250));
   const fn = actions[action];
   if (!fn) throw Object.assign(new Error('Неизвестное действие: ' + action), { code: 'UNKNOWN_ACTION' });
+  const viewer = key === 'view';
+  if (viewer && !VIEWER_ACTIONS.includes(action)) throw Object.assign(new Error('Доступ только для просмотра'), { code: 'READ_ONLY' });
   try {
-    return JSON.parse(JSON.stringify(fn(params || {})));
+    const res = fn({ ...(params || {}), _viewer: viewer });
+    if (action === 'ping' || action === 'getSettings') Object.assign(res, { role: viewer ? 'viewer' : 'owner' });
+    return JSON.parse(JSON.stringify(res));
   } catch (e) {
     throw Object.assign(new Error(e.message), { code: e.code || 'ERROR', data: e.data });
   }
@@ -192,7 +226,7 @@ export async function mockCall(action, params) {
 // ---------- Вспомогательное ----------
 
 function full(w) {
-  const rows = w.rows.map((r, i) => ({ row: 9 + i, ...r }));
+  const rows = w.rows.map((r, i) => ({ row: 9 + i, ...r, comments: notes[`${w.sheetName}|${r.object}`] || [] }));
   const active = rows.filter(r => !['Не назначен', 'Не требуется', 'Отменено'].includes(r.status));
   const nums = active.map(r => r.readiness).filter(v => v !== null && v !== '');
   return {

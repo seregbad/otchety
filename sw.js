@@ -1,5 +1,5 @@
 // Оболочка приложения доступна без связи. Сначала сеть, чтобы обновления приходили сразу.
-const CACHE = 'otchety-v12';
+const CACHE = 'otchety-v14';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'api.js', 'mock.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',

@@ -35,7 +35,7 @@ export function createApi(getCfg) {
   async function once(action, params) {
     const { url, key } = getCfg();
     if (!url) throw new ApiError({ code: 'NO_CONFIG', message: 'Не настроено подключение к таблице' });
-    if (url === 'demo') return mockCall(action, params);
+    if (url === 'demo') return mockCall(action, params, key);
 
     const ctrl = new AbortController();
     // Сборка истории и PDF на стороне Google бывают долгими — им больше времени.
